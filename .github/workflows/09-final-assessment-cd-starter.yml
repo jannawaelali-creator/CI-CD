@@ -1,0 +1,182 @@
+name: 09 Final Assessment CD dev branch
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: tiny-health-app
+  APP_PORT: "8000"
+
+jobs:
+  build-and-push:
+    name: Build and push release image
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: "${{ steps.image-tag.outputs.value }}"
+      image_ref: "${{ steps.image-ref.outputs.value }}"
+
+    steps:
+      - name: Check required GitHub secrets
+        env:
+          REGISTRY_HOST: ${{ secrets.REGISTRY_HOST }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -e
+          if [ -z "$REGISTRY_HOST" ]; then
+            echo "REGISTRY_HOST secret is missing"
+            exit 1
+          fi
+          if [ -z "$REGISTRY_USERNAME" ]; then
+            echo "REGISTRY_USERNAME secret is missing"
+            exit 1
+          fi
+          if [ -z "$REGISTRY_PASSWORD" ]; then
+            echo "REGISTRY_PASSWORD secret is missing"
+            exit 1
+          fi
+          if [ -z "$DEPLOY_HOST" ]; then
+            echo "DEPLOY_HOST secret is missing"
+            exit 1
+          fi
+          if [ -z "$DEPLOY_USER" ]; then
+            echo "DEPLOY_USER secret is missing"
+            exit 1
+          fi
+          if [ -z "$DEPLOY_SSH_KEY" ]; then
+            echo "DEPLOY_SSH_KEY secret is missing"
+            exit 1
+          fi
+          echo "All required secrets are present"
+
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Create image tag
+        id: image-tag
+        run: |
+          TODAY="$(date -u +%Y-%m-%d)"
+          IMAGE_TAG="${TODAY}-${GITHUB_RUN_ID}"
+          echo "value=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $IMAGE_TAG"
+
+      - name: Create full image reference
+        id: image-ref
+        run: |
+          IMAGE_REF="${{ secrets.REGISTRY_HOST }}/${{ env.IMAGE_NAME }}:${{ steps.image-tag.outputs.value }}"
+          echo "value=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          echo "Full image reference: $IMAGE_REF"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Show image reference
+        run: echo "Pushing image ${{ steps.image-ref.outputs.value }}"
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image-ref.outputs.value }}
+
+  deploy-to-host:
+    name: Deploy to remote host
+    needs:
+      - build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy image over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          REGISTRY_HOST: ${{ secrets.REGISTRY_HOST }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          COMMIT_SHA: ${{ github.sha }}
+          APP_PORT: ${{ env.APP_PORT }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: REGISTRY_HOST,REGISTRY_USERNAME,REGISTRY_PASSWORD,IMAGE_TAG,IMAGE_REF,COMMIT_SHA,APP_PORT
+          script: |
+            set -e
+            echo "Checking Docker availability..."
+            docker --version || (echo "Docker is not available" && exit 1)
+            
+            echo "Logging in to registry..."
+            echo "$REGISTRY_PASSWORD" | docker login -u "$REGISTRY_USERNAME" --password-stdin "$REGISTRY_HOST"
+            
+            echo "Pulling image $IMAGE_REF..."
+            docker pull "$IMAGE_REF"
+            
+            echo "Stopping and removing old container..."
+            docker stop tiny-health-container || true
+            docker rm tiny-health-container || true
+            
+            echo "Starting new container..."
+            docker run -d \
+              --name tiny-health-container \
+              -p "${APP_PORT}:${APP_PORT}" \
+              -e "APP_ENV=production" \
+              -e "APP_VERSION=${IMAGE_TAG}" \
+              -e "COMMIT_SHA=${COMMIT_SHA}" \
+              -e "DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              -e "IMAGE_TAG=${IMAGE_TAG}" \
+              -e "DEPLOY_MODE=github-actions" \
+              "$IMAGE_REF"
+            
+            echo "Waiting for app to be healthy..."
+            for attempt in 1 2 3 4 5; do
+              if curl --fail --silent "http://127.0.0.1:${APP_PORT}/health" > /dev/null 2>&1; then
+                echo "App is healthy"
+                break
+              fi
+              echo "Attempt $attempt: Waiting for app to be ready..."
+              sleep 2
+            done
+            
+            echo "Checking version..."
+            curl --fail --silent "http://127.0.0.1:${APP_PORT}/version" | head -c 200
+            echo ""
+            
+            echo "Checking status..."
+            curl --fail --silent "http://127.0.0.1:${APP_PORT}/status" | head -c 200
+            echo ""
+
+      - name: Validate deployed app from GitHub Actions
+        run: |
+          echo "Validating deployed app from runner..."
+          
+          DEPLOY_HOST="${{ secrets.DEPLOY_HOST }}"
+          APP_PORT="${{ env.APP_PORT }}"
+          
+          echo "Health check..."
+          curl --fail --silent "http://${DEPLOY_HOST}:${APP_PORT}/health"
+          echo ""
+          
+          echo "Version check..."
+          curl --fail --silent "http://${DEPLOY_HOST}:${APP_PORT}/version"
+          echo ""
+          
+          echo "Status check..."
+          curl --fail --silent "http://${DEPLOY_HOST}:${APP_PORT}/status"
+          echo ""
+          
+          echo "Deployment validation complete!"
