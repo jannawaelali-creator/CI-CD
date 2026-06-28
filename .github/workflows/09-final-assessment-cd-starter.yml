@@ -15,8 +15,8 @@ jobs:
     runs-on: ubuntu-latest
 
     outputs:
-      image_tag: "${{ steps.image-tag.outputs.value }}"
-      image_ref: "${{ steps.image-ref.outputs.value }}"
+      image_tag: ${{ steps.image-tag.outputs.value }}
+      image_ref: ${{ steps.image-ref.outputs.value }}
 
     steps:
       - name: Check required GitHub secrets
