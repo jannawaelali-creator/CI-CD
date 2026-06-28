@@ -61,6 +61,6 @@ jobs:
       - name: Run Trivy image scan
         uses: aquasecurity/trivy-action@master
         with:
-          input: ${{ env.PR_SCAN_IMAGE }}
+          image-ref: ${{ env.PR_SCAN_IMAGE }}
           format: sarif
           output: trivy-image-results.sarif
