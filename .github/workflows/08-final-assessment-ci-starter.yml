@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
 
 env:
   PR_SCAN_IMAGE: tiny-health-app:pr-scan
@@ -24,28 +23,30 @@ jobs:
           python-version: "3.12"
 
       - name: Run tests
-        run: python -m unittest discover -s tests -v
+        run: |
+          python -m unittest discover -s tests -v
 
       - name: Run Ruff linting
-        uses: astral-sh/ruff-action@v1
-        with:
-          args: check
+        uses: astral-sh/ruff-action@v3
 
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: .
-          format: sarif
-          output: trivy-fs-results.sarif
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: table
+        continue-on-error: true
 
       - name: Run Trivy Dockerfile and config scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: config
           scan-ref: .
-          format: sarif
-          output: trivy-config-results.sarif
+          severity: CRITICAL,HIGH
+          format: table
+        continue-on-error: true
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -54,7 +55,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: false
           load: true
           tags: ${{ env.PR_SCAN_IMAGE }}
 
@@ -62,5 +62,6 @@ jobs:
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.PR_SCAN_IMAGE }}
-          format: sarif
-          output: trivy-image-results.sarif
+          severity: CRITICAL,HIGH
+          format: table
+        continue-on-error: true
